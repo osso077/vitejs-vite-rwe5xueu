@@ -1,365 +1,402 @@
 
-import { useRef, useState, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { createRoot } from "react-dom/client";
 
 type Ingredient = {
   id: string;
   name: string;
-  symbol: string;
-  kind: "pour" | "egg";
-  min: number;
-  max: number;
+  emoji: string;
   color: string;
+  kind: "pour" | "egg";
+  speed: number;
 };
 
 const ingredients: Ingredient[] = [
-  { id: "flour", name: "밀가루", symbol: "🌾", kind: "pour", min: 30, max: 260, color: "#E7D5B7" },
-  { id: "butter", name: "버터", symbol: "🧈", kind: "pour", min: 10, max: 160, color: "#F6DB9A" },
-  { id: "sugar", name: "설탕", symbol: "🍬", kind: "pour", min: 10, max: 180, color: "#EFE6DD" },
-  { id: "egg", name: "달걀", symbol: "🥚", kind: "egg", min: 0, max: 0, color: "#E7BA8A" },
-  { id: "milk", name: "우유", symbol: "🥛", kind: "pour", min: 20, max: 250, color: "#D5E5E8" },
-  { id: "cocoa", name: "코코아", symbol: "🍫", kind: "pour", min: 5, max: 60, color: "#B38D7A" },
+  { id: "flour", name: "밀가루", emoji: "🌾", color: "#E9D7B8", kind: "pour", speed: 75 },
+  { id: "butter", name: "버터", emoji: "🧈", color: "#F4D99E", kind: "pour", speed: 42 },
+  { id: "sugar", name: "설탕", emoji: "🍬", color: "#F5E9D8", kind: "pour", speed: 55 },
+  { id: "egg", name: "달걀", emoji: "🥚", color: "#E8BD91", kind: "egg", speed: 0 },
+  { id: "milk", name: "우유", emoji: "🥛", color: "#D8E7EB", kind: "pour", speed: 105 },
+  { id: "cocoa", name: "코코아", emoji: "🍫", color: "#AB836F", kind: "pour", speed: 28 },
 ];
 
-type Drag = {
-  id: number;
+type DragState = {
+  pointerId: number;
   ingredient: Ingredient;
-  portion: number;
-  x: number;
-  y: number;
+  startX: number;
+  startY: number;
+  moved: boolean;
+  inside: boolean;
+  fraction: number;
 };
 
-function amountLabel(value: number) {
-  if (value < 34) return "조금";
-  if (value < 68) return "적당히";
-  return "듬뿍";
-}
-
-function toGrams(item: Ingredient, portion: number) {
-  const raw = item.min + ((item.max - item.min) * portion) / 100;
-  return Math.round(raw / 5) * 5;
-}
-
 function BakingDemo() {
-  const [selected, setSelected] = useState<Ingredient>(ingredients[0]);
-  const [portion, setPortion] = useState(50);
   const [bowl, setBowl] = useState<Record<string, number>>({});
-  const [eggCount, setEggCount] = useState(0);
-  const [cracking, setCracking] = useState(false);
-  const [crackHits, setCrackHits] = useState(0);
-  const [floating, setFloating] = useState<{
+  const [eggs, setEggs] = useState(0);
+  const [selected, setSelected] = useState("flour");
+  const [dragging, setDragging] = useState<{
+    name: string;
     x: number;
     y: number;
-    name: string;
   } | null>(null);
+  const [pouring, setPouring] = useState<string | null>(null);
+  const [eggDialog, setEggDialog] = useState(false);
+  const [eggTaps, setEggTaps] = useState(0);
 
-  const bowlRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<Drag | null>(null);
+  const bowlRef = useRef<SVGSVGElement>(null);
+  const dragRef = useRef<DragState | null>(null);
 
-  const addedIngredients = ingredients.filter((item) =>
-    item.kind === "egg" ? eggCount > 0 : (bowl[item.id] || 0) > 0
+  // 볼 위에 머무는 시간만큼 양이 쌓여요.
+  useEffect(() => {
+    let frame = 0;
+    let previousTime = performance.now();
+
+    const update = (now: number) => {
+      const elapsed = Math.min(now - previousTime, 80);
+      previousTime = now;
+      const current = dragRef.current;
+
+      if (
+        current?.moved &&
+        current.inside &&
+        current.ingredient.kind === "pour"
+      ) {
+        current.fraction += current.ingredient.speed * elapsed / 1000;
+
+        const grams = Math.floor(current.fraction);
+
+        if (grams > 0) {
+          current.fraction -= grams;
+          const id = current.ingredient.id;
+
+          setBowl((old) => ({
+            ...old,
+            [id]: (old[id] || 0) + grams,
+          }));
+        }
+      }
+
+      frame = requestAnimationFrame(update);
+    };
+
+    frame = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  const itemsInBowl = ingredients.filter((item) =>
+    item.kind === "egg"
+      ? eggs > 0
+      : (bowl[item.id] || 0) > 0
   );
 
-  const total = Object.values(bowl).reduce((sum, grams) => sum + grams, 0)
-    + eggCount * 50;
+  const total =
+    Object.values(bowl).reduce((sum, grams) => sum + grams, 0) +
+    eggs * 50;
 
-  function selectIngredient(item: Ingredient) {
-    if (selected.id !== item.id) {
-      setSelected(item);
-      setPortion(50);
-    }
+  const bowlFill = Math.min(1, total / 750);
+
+  function startEgg() {
+    setEggTaps(0);
+    setEggDialog(true);
   }
 
-  function putIngredient(item: Ingredient, value: number) {
-    if (item.kind === "egg") {
-      setCrackHits(0);
-      setCracking(true);
-      return;
-    }
-
-    // 횟수가 아니라 설정한 양으로 교체
-    setBowl((previous) => ({
-      ...previous,
-      [item.id]: toGrams(item, value),
-    }));
-  }
-
-  function crackEgg() {
-    if (crackHits === 0) {
-      setCrackHits(1);
+  function tapEgg() {
+    if (eggTaps === 0) {
+      setEggTaps(1);
     } else {
-      setEggCount((count) => count + 1);
-      setCrackHits(0);
-      setCracking(false);
+      setEggs((value) => value + 1);
+      setEggTaps(0);
+      setEggDialog(false);
     }
   }
 
-  function startDrag(
+  function isOverBowl(x: number, y: number) {
+    const box = bowlRef.current?.getBoundingClientRect();
+
+    return !!box &&
+      x >= box.left &&
+      x <= box.right &&
+      y >= box.top &&
+      y <= box.bottom;
+  }
+
+  function onIngredientDown(
     event: PointerEvent<HTMLButtonElement>,
     item: Ingredient
   ) {
     if (event.pointerType === "mouse" && event.button !== 0) return;
 
-    const currentPortion = selected.id === item.id ? portion : 50;
-    selectIngredient(item);
+    setSelected(item.id);
 
     dragRef.current = {
-      id: event.pointerId,
+      pointerId: event.pointerId,
       ingredient: item,
-      portion: currentPortion,
-      x: event.clientX,
-      y: event.clientY,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+      inside: false,
+      fraction: 0,
     };
 
     event.currentTarget.setPointerCapture(event.pointerId);
   }
 
-  function moveDrag(event: PointerEvent<HTMLButtonElement>) {
-    const drag = dragRef.current;
-    if (!drag || drag.id !== event.pointerId) return;
+  function onIngredientMove(event: PointerEvent<HTMLButtonElement>) {
+    const current = dragRef.current;
 
-    if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 12) {
-      setFloating({
-        x: event.clientX,
-        y: event.clientY,
-        name: drag.ingredient.name,
-      });
-    }
-  }
-
-  function endDrag(event: PointerEvent<HTMLButtonElement>) {
-    const drag = dragRef.current;
-    if (!drag || drag.id !== event.pointerId) return;
-
-    const bounds = bowlRef.current?.getBoundingClientRect();
-    const moved = Math.hypot(event.clientX - drag.x, event.clientY - drag.y);
+    if (!current || event.pointerId !== current.pointerId) return;
 
     if (
-      moved > 12 &&
-      bounds &&
-      event.clientX >= bounds.left &&
-      event.clientX <= bounds.right &&
-      event.clientY >= bounds.top &&
-      event.clientY <= bounds.bottom
+      Math.hypot(
+        event.clientX - current.startX,
+        event.clientY - current.startY
+      ) > 10
     ) {
-      putIngredient(drag.ingredient, drag.portion);
+      current.moved = true;
+    }
+
+    if (!current.moved) return;
+
+    current.inside = isOverBowl(event.clientX, event.clientY);
+
+    setDragging({
+      name: current.ingredient.name,
+      x: event.clientX,
+      y: event.clientY,
+    });
+
+    setPouring(
+      current.inside && current.ingredient.kind === "pour"
+        ? current.ingredient.id
+        : null
+    );
+  }
+
+  function finishDrag(event: PointerEvent<HTMLButtonElement>) {
+    const current = dragRef.current;
+
+    if (!current || current.pointerId !== event.pointerId) return;
+
+    if (
+      current.ingredient.kind === "egg" &&
+      (!current.moved || current.inside)
+    ) {
+      startEgg();
     }
 
     dragRef.current = null;
-    setFloating(null);
+    setDragging(null);
+    setPouring(null);
 
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
   }
 
+  function cancelDrag() {
+    dragRef.current = null;
+    setDragging(null);
+    setPouring(null);
+  }
+
   return (
-    <main className="baking-game">
+    <main className="baking-app">
       <style>{styles}</style>
 
-      <header className="baking-header">
+      <header className="baking-top">
         <span className="baking-logo">little days ♡</span>
-        <span className="baking-subtitle">MY LITTLE KITCHEN</span>
+        <span className="baking-heading">MY LITTLE KITCHEN</span>
       </header>
 
-      <section className="baking-scene">
-        <div className="baking-title">
+      <section className="baking-room">
+        <div className="baking-intro">
           <span>A LITTLE BAKING TIME</span>
           <h1>오늘은 무엇을 구워볼까?</h1>
-          <p>좋아하는 재료를 마음껏 골라봐요.</p>
+          <p>재료를 직접 잡아서 믹싱볼에 담아봐요.</p>
         </div>
 
-        <div className="baking-drop-zone" ref={bowlRef}>
-          <svg className="baking-bowl" viewBox="0 0 360 275" role="img" aria-label="믹싱볼">
-            <ellipse cx="180" cy="245" rx="124" ry="14" fill="#897B6A" opacity=".13"/>
+        <div className="baking-bowl-area">
+          {pouring && (
+            <div className="baking-sprinkles" aria-hidden="true">
+              ✦ · · ✧ · ✦
+            </div>
+          )}
+
+          <svg
+            ref={bowlRef}
+            className="baking-bowl"
+            viewBox="0 0 360 265"
+            role="img"
+            aria-label="도자기 믹싱볼"
+          >
+            <ellipse
+              cx="180" cy="246" rx="129" ry="13"
+              fill="#746A5C" opacity=".12"
+            />
             <path
-              d="M44 88 Q55 228 180 244 Q305 228 316 88 Z"
-              fill="#DCE7DF"
-              stroke="#A5B6AC"
+              d="M43 89 Q55 224 180 244 Q305 224 317 89 Z"
+              fill="#DCE8E0"
+              stroke="#A9BCAF"
               strokeWidth="5"
             />
-            <ellipse cx="180" cy="88" rx="136" ry="46" fill="#F8F5EC" stroke="#A5B6AC" strokeWidth="5"/>
+            <ellipse
+              cx="180" cy="89" rx="136" ry="46"
+              fill="#FBF8F2"
+              stroke="#A9BCAF"
+              strokeWidth="5"
+            />
+
             {total > 0 && (
               <ellipse
                 cx="180"
-                cy="92"
-                rx="120"
-                ry="32"
-                fill="#E7C9A8"
-                opacity={Math.min(1, 0.4 + total / 500)}
+                cy="93"
+                rx={62 + 56 * bowlFill}
+                ry={14 + 21 * bowlFill}
+                fill={bowl.cocoa ? "#B79C8A" : "#E8D1B0"}
               />
             )}
-            {eggCount > 0 && (
-              <ellipse cx="180" cy="86" rx="27" ry="19" fill="#F5C568"/>
+
+            {eggs > 0 && (
+              <ellipse
+                cx="185" cy="89" rx="21" ry="15"
+                fill="#F2C76C"
+              />
             )}
-            <ellipse cx="180" cy="82" rx="136" ry="46" fill="none" stroke="#FFFDF6" strokeWidth="5"/>
+
+            <ellipse
+              cx="180" cy="82" rx="136" ry="46"
+              fill="none"
+              stroke="#FFFFFF"
+              strokeWidth="5"
+            />
           </svg>
 
-          <div className="bowl-caption">
-            <strong>{total === 0 ? "빈 믹싱볼" : "나만의 반죽 준비 중"}</strong>
+          <div className="bowl-status" aria-live="polite">
+            <strong>
+              {pouring
+                ? `${ingredients.find((i) => i.id === pouring)?.name}가 사르르…`
+                : total
+                  ? "맛있는 반죽을 만드는 중"
+                  : "빈 믹싱볼"}
+            </strong>
             <span>
-              {total === 0
-                ? "재료를 믹싱볼로 끌어오세요"
-                : `${addedIngredients.length}가지 재료가 담겼어요`}
+              {pouring
+                ? "손을 떼면 멈춰요"
+                : total
+                  ? `${itemsInBowl.length}가지 재료가 담겼어요`
+                  : "아래 재료를 여기로 끌어와요"}
             </span>
           </div>
         </div>
 
-        <div className="baking-receipt">
-          <div className="receipt-heading">
-            <strong>내가 담은 재료</strong>
+        <div className="baking-summary">
+          <div className="summary-top">
+            <strong>담긴 재료</strong>
             <button
               type="button"
               disabled={total === 0}
               onClick={() => {
                 setBowl({});
-                setEggCount(0);
+                setEggs(0);
               }}
             >
-              모두 비우기
+              처음부터 다시
             </button>
           </div>
 
-          <div className="baking-chips">
-            {addedIngredients.length === 0 ? (
-              <span className="empty-message">어떤 재료부터 넣어볼까?</span>
+          <div className="summary-items">
+            {itemsInBowl.length === 0 ? (
+              <span className="summary-empty">
+                재료를 넣으면 여기에 나타나요.
+              </span>
             ) : (
-              addedIngredients.map((item) => {
-                let label = "";
-
-                if (item.kind === "egg") {
-                  label = `${eggCount}개`;
-                } else {
-                  const grams = bowl[item.id];
-                  const value = ((grams - item.min) / (item.max - item.min)) * 100;
-                  label = amountLabel(value);
-                }
-
-                return (
-                  <span className="baking-chip" key={item.id}>
-                    {item.name} · {label}
-                  </span>
-                );
-              })
+              itemsInBowl.map((item) => (
+                <span className="summary-pill" key={item.id}>
+                  {item.name}
+                  {item.kind === "egg" ? ` ${eggs}개` : ""}
+                </span>
+              ))
             )}
           </div>
         </div>
       </section>
 
-      <section className="baking-dock">
-        <div className="dock-heading">
+      <section className="baking-pantry">
+        <div className="pantry-title">
           <strong>재료 보관함</strong>
-          <span>터치하거나 믹싱볼로 드래그해요</span>
+          <span>끌어와서 오래 누르면 많이, 짧게 누르면 조금!</span>
         </div>
 
-        <div className="ingredient-list">
+        <div className="pantry-grid">
           {ingredients.map((item) => (
             <button
-              key={item.id}
               type="button"
-              className={`ingredient ${selected.id === item.id ? "selected" : ""}`}
-              onClick={() => selectIngredient(item)}
-              onPointerDown={(event) => startDrag(event, item)}
-              onPointerMove={moveDrag}
-              onPointerUp={endDrag}
-              onPointerCancel={() => {
-                dragRef.current = null;
-                setFloating(null);
+              key={item.id}
+              className={`pantry-item ${
+                selected === item.id ? "selected" : ""
+              }`}
+              onPointerDown={(event) =>
+                onIngredientDown(event, item)
+              }
+              onPointerMove={onIngredientMove}
+              onPointerUp={finishDrag}
+              onPointerCancel={cancelDrag}
+              onClick={(event) => {
+                if (event.detail === 0 && item.kind === "egg") {
+                  startEgg();
+                }
               }}
             >
-              <span className="ingredient-symbol">{item.symbol}</span>
-              <span>{item.name}</span>
+              <span className="pantry-emoji">{item.emoji}</span>
+              <span className="pantry-name">{item.name}</span>
             </button>
           ))}
         </div>
 
-        {selected.kind === "egg" ? (
-          <div className="egg-controls">
-            <span>🥚 달걀은 직접 깨서 넣어요! · 현재 {eggCount}개</span>
-            <button type="button" onClick={() => putIngredient(selected, 0)}>
-              달걀 깨기
-            </button>
-          </div>
-        ) : (
-          <div className="measure-controls">
-            <div className="measure-cup" aria-hidden="true">
-              <div
-                className="measure-fill"
-                style={{
-                  height: `${15 + portion * 0.75}%`,
-                  background: selected.color,
-                }}
-              />
-            </div>
-
-            <div className="measure-main">
-              <div className="measure-caption">
-                <span>{selected.name}</span>
-                <strong>{amountLabel(portion)}</strong>
-              </div>
-
-              <input
-                type="range"
-                aria-label={`${selected.name} 양 조절`}
-                min="0"
-                max="100"
-                step="1"
-                value={portion}
-                onChange={(event) => setPortion(Number(event.target.value))}
-              />
-
-              <div className="measure-labels">
-                <span>조금</span>
-                <span>적당히</span>
-                <span>듬뿍</span>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              className="pour-button"
-              onClick={() => putIngredient(selected, portion)}
-            >
-              이만큼 담기
-            </button>
-          </div>
-        )}
+        <p className="pantry-hint">
+          밀가루를 믹싱볼 위로 끌어간 다음 꾹 누르고 있어봐요 ♡
+        </p>
       </section>
 
-      {floating && (
-        <div className="floating-ingredient" style={{ left: floating.x, top: floating.y }}>
-          {floating.name}
+      {dragging && (
+        <div
+          className="drag-ingredient"
+          style={{ left: dragging.x, top: dragging.y }}
+        >
+          {dragging.name}
         </div>
       )}
 
-      {cracking && (
-        <div className="egg-overlay">
-          <div className="egg-dialog" role="dialog" aria-modal="true" aria-label="달걀 깨기">
-            <p className="egg-eyebrow">CRACK THE EGG</p>
+      {eggDialog && (
+        <div className="egg-cover">
+          <div
+            className="egg-popup"
+            role="dialog"
+            aria-modal="true"
+            aria-label="달걀 깨기"
+          >
+            <span className="egg-eyebrow">CRACK THE EGG</span>
             <h2>달걀을 톡톡!</h2>
             <p>
-              {crackHits === 0
-                ? "달걀을 터치해서 껍질에 금을 내봐요."
-                : "금이 갔어요! 한 번 더 톡!"}
+              {eggTaps
+                ? "금이 갔어요! 한 번 더 톡!"
+                : "달걀을 두 번 두드려 봐요."}
             </p>
 
             <button
+              className="egg-button"
               type="button"
-              className={`egg-to-crack ${crackHits > 0 ? "cracked" : ""}`}
-              onClick={crackEgg}
-              aria-label="달걀 껍질 두드리기"
+              onClick={tapEgg}
+              aria-label="달걀 두드리기"
             >
               🥚
-              {crackHits > 0 && <span className="crack-mark">⌁</span>}
+              {eggTaps ? <span className="egg-crack">⌁</span> : null}
             </button>
 
             <button
+              className="egg-close"
               type="button"
-              className="cancel-egg"
-              onClick={() => {
-                setCracking(false);
-                setCrackHits(0);
-              }}
+              onClick={() => setEggDialog(false)}
             >
               돌아가기
             </button>
@@ -374,406 +411,358 @@ const styles = `
 @import url('https://fonts.googleapis.com/css2?family=Gowun+Dodum&family=Jua&display=swap');
 
 * { box-sizing: border-box; }
-
-html, body, #root {
-  margin: 0;
-  width: 100%;
-  height: 100%;
-}
+html, body, #root { width: 100%; height: 100%; margin: 0; }
 
 body {
-  background: #F7F2EE;
-  color: #766D63;
+  background: #F6F0EC;
+  color: #766C63;
   font-family: 'Gowun Dodum', sans-serif;
+  min-width: 0;
 }
 
-button, input { font: inherit; }
-button { cursor: pointer; }
+button { font: inherit; cursor: pointer; }
+#root { max-width: none; padding: 0; text-align: left; }
 
-.baking-game {
+.baking-app {
   height: 100dvh;
-  min-height: 480px;
-  overflow: hidden;
   display: grid;
-  grid-template-rows: 52px minmax(0, 1fr) auto;
-  background: #F7F2EE;
+  grid-template-rows: 54px minmax(0, 1fr) auto;
+  overflow: hidden;
+  background: #F7F3EF;
 }
 
-.baking-header {
+.baking-top {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  padding: 8px 18px;
-  background: #FFFDF9;
+  align-items: center;
+  padding: 8px 16px;
+  background: #FFFDF8;
 }
 
 .baking-logo {
-  font: 22px 'Jua', sans-serif;
-  color: #8F7C74;
+  font: 21px 'Jua', sans-serif;
+  color: #89786B;
 }
 
-.baking-subtitle {
+.baking-heading {
   font-size: 10px;
-  letter-spacing: 2px;
-  color: #AB9D95;
+  color: #A99B91;
+  letter-spacing: 1.6px;
 }
 
-.baking-scene {
+.baking-room {
   min-height: 0;
-  overflow-y: auto;
   display: flex;
-  flex-direction: column;
   align-items: center;
+  flex-direction: column;
+  overflow-y: auto;
   background: linear-gradient(
-    #F7F0F5 0%,
-    #F4F5F0 65%,
-    #E9D6C9 66%,
-    #EBDACA 100%
+    #F5EEF8,
+    #F7F8F3 65%,
+    #EADBCF 66%,
+    #E9D9C9
   );
 }
 
-.baking-title {
-  padding: 18px 12px 0;
+.baking-intro {
+  padding: 20px 12px 0;
   text-align: center;
 }
 
-.baking-title > span {
+.baking-intro span {
   font-size: 10px;
   letter-spacing: 2px;
-  color: #B3A1A0;
+  color: #B39F9C;
 }
 
-.baking-title h1 {
+.baking-intro h1 {
   font: 28px 'Jua', sans-serif;
-  color: #87786F;
-  margin: 5px 0;
+  margin: 7px 0;
+  color: #867A71;
 }
 
-.baking-title p {
+.baking-intro p {
   margin: 0;
   font-size: 12px;
-  color: #A39791;
+  color: #9F958B;
 }
 
-.baking-drop-zone {
+.baking-bowl-area {
   flex: 1;
-  min-height: 160px;
-  width: min(100%, 480px);
+  min-height: 170px;
+  width: min(100%, 450px);
+  position: relative;
   display: grid;
   place-items: center;
-  position: relative;
-  padding: 0 12px 27px;
+  padding: 0 13px 26px;
 }
 
 .baking-bowl {
-  display: block;
-  width: min(75%, 280px);
+  width: min(78%, 300px);
   min-width: 160px;
-  filter: drop-shadow(0 8px 9px #8B7B6A25);
+  display: block;
+  filter: drop-shadow(0 7px 9px #77685822);
 }
 
-.bowl-caption {
+.baking-sprinkles {
   position: absolute;
-  bottom: 5px;
+  z-index: 1;
   left: 50%;
+  top: 22%;
+  transform: translateX(-50%);
+  font-size: 21px;
+  color: #B49A74;
+  pointer-events: none;
+  animation: sprinkle .65s ease-in-out infinite alternate;
+}
+
+@keyframes sprinkle {
+  from {
+    opacity: .45;
+    transform: translate(-50%, -6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 15px);
+  }
+}
+
+.bowl-status {
+  position: absolute;
+  left: 50%;
+  bottom: 7px;
   transform: translateX(-50%);
   display: flex;
   flex-direction: column;
   align-items: center;
+  padding: 6px 15px;
+  border-radius: 17px;
+  background: #FFFDF5F0;
   white-space: nowrap;
-  padding: 7px 16px;
-  border-radius: 18px;
-  background: #FFFDF5EF;
-  box-shadow: 0 4px 14px #9C847015;
+  box-shadow: 0 4px 12px #947D6E1E;
 }
 
-.bowl-caption strong { font-size: 13px; }
-.bowl-caption span { font-size: 10px; }
+.bowl-status strong { font-size: 13px; }
+.bowl-status span { font-size: 10px; }
 
-.baking-receipt {
-  width: min(94%, 520px);
-  margin: 0 0 12px;
-  padding: 10px 14px;
+.baking-summary {
+  flex: none;
+  width: min(94%, 540px);
+  margin: 0 0 13px;
+  padding: 11px 13px;
   border-radius: 15px;
-  background: #FFFDF6EB;
+  background: #FFFDF5EE;
 }
 
-.receipt-heading {
+.summary-top {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
 }
 
-.receipt-heading strong { font-size: 13px; }
+.summary-top strong { font-size: 13px; }
 
-.receipt-heading button {
-  border: 0;
-  background: none;
-  color: #A18A7A;
+.summary-top button {
   font-size: 11px;
+  color: #9F887B;
+  background: none;
+  border: 0;
 }
 
-.receipt-heading button:disabled { opacity: .4; }
+.summary-top button:disabled { opacity: .35; }
 
-.baking-chips {
+.summary-items {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: 6px;
   margin-top: 7px;
 }
 
-.baking-chip {
-  padding: 5px 9px;
-  border-radius: 20px;
-  background: #F1E7DE;
+.summary-pill {
+  font-size: 11px;
+  padding: 5px 10px;
+  border-radius: 16px;
+  background: #F0E6DD;
+}
+
+.summary-empty {
+  color: #AFA39B;
   font-size: 11px;
 }
 
-.empty-message {
-  color: #B0A49B;
-  font-size: 11px;
+.baking-pantry {
+  background: #FFF9F5;
+  padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+  border-top: 1px solid #E8DED4;
 }
 
-.baking-dock {
-  padding: 12px 14px calc(14px + env(safe-area-inset-bottom));
-  background: #FFFAF6;
-  border-top: 1px solid #E8DED6;
-}
-
-.dock-heading {
+.pantry-title {
   display: flex;
+  align-items: baseline;
   justify-content: space-between;
   gap: 10px;
-  align-items: baseline;
   margin-bottom: 10px;
 }
 
-.dock-heading strong {
+.pantry-title strong {
   font: 18px 'Jua', sans-serif;
 }
 
-.dock-heading span {
+.pantry-title span {
   font-size: 10px;
-  color: #AA9A91;
+  color: #A9988E;
 }
 
-.ingredient-list {
+.pantry-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 8px;
+  gap: 9px;
   max-width: 730px;
   margin: auto;
 }
 
-.ingredient {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 8px 4px;
-  border: 2px solid #ECE3DA;
+.pantry-item {
+  border: 2px solid #EDE4DA;
   border-radius: 14px;
   background: #FFFDF9;
   color: #776B62;
-  font-size: 12px;
-  user-select: none;
-  touch-action: none;
-}
-
-.ingredient.selected {
-  background: #EFF5EF;
-  border-color: #A9BEAD;
-}
-
-.ingredient-symbol { font-size: 26px; }
-
-.measure-controls {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  max-width: 730px;
-  margin: 12px auto 0;
-}
-
-.measure-cup {
-  width: 38px;
-  height: 60px;
-  flex: 0 0 38px;
-  border: 3px solid #C7B9AE;
-  border-top: 0;
-  border-radius: 2px 2px 10px 10px;
-  background: #FFFDF9;
+  min-width: 0;
+  padding: 8px 2px;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
-  overflow: hidden;
-}
-
-.measure-fill {
-  width: 100%;
-  border-radius: 5px 5px 0 0;
-  transition: height .16s ease;
-}
-
-.measure-main { flex: 1; min-width: 0; }
-
-.measure-caption {
-  display: flex;
-  justify-content: space-between;
-  font-size: 12px;
-}
-
-.measure-caption strong {
-  color: #879D8C;
-  font-size: 14px;
-}
-
-.measure-main input {
-  display: block;
-  width: 100%;
-  margin: 7px 0;
-  accent-color: #9AB3A1;
-}
-
-.measure-labels {
-  display: flex;
-  justify-content: space-between;
-  color: #ABA096;
-  font-size: 10px;
-}
-
-.pour-button,
-.egg-controls button {
-  border: 0;
-  border-radius: 13px;
-  background: #A2B7A4;
-  color: white;
-  padding: 11px 14px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.egg-controls {
-  display: flex;
-  justify-content: space-between;
+  justify-content: center;
   align-items: center;
-  gap: 10px;
-  max-width: 730px;
-  margin: 14px auto 0;
+  gap: 4px;
+  touch-action: none;
+  user-select: none;
 }
 
-.egg-controls span {
-  font-size: 12px;
+.pantry-item.selected {
+  border-color: #A9BEAD;
+  background: #F1F7F0;
 }
 
-.floating-ingredient {
+.pantry-emoji {
+  font-size: 26px;
+  line-height: 1.1;
+}
+
+.pantry-name { font-size: 12px; }
+
+.pantry-hint {
+  margin: 9px 0 0;
+  text-align: center;
+  color: #AA9D94;
+  font-size: 11px;
+}
+
+.drag-ingredient {
   position: fixed;
-  z-index: 30;
-  pointer-events: none;
+  z-index: 20;
   transform: translate(-50%, -125%);
-  padding: 10px 15px;
-  border: 2px solid #A1B7A4;
-  border-radius: 20px;
+  pointer-events: none;
   background: #FFFDF7;
-  box-shadow: 0 8px 18px #6E605830;
+  border: 2px solid #ACBFAC;
+  border-radius: 18px;
+  padding: 10px 14px;
   font-size: 13px;
+  box-shadow: 0 8px 20px #63594F28;
 }
 
-.egg-overlay {
+.egg-cover {
   position: fixed;
   inset: 0;
-  z-index: 50;
-  background: #53494075;
+  z-index: 30;
   display: grid;
   place-items: center;
-  padding: 20px;
+  background: #52463A72;
+  padding: 18px;
 }
 
-.egg-dialog {
+.egg-popup {
   width: min(100%, 340px);
+  padding: 26px 20px;
   background: #FFF9F2;
-  border: 5px solid #FFFDF9;
-  border-radius: 26px;
-  padding: 24px 18px;
+  border: 5px solid white;
+  border-radius: 28px;
   text-align: center;
-  box-shadow: 0 18px 45px #41372E30;
+  box-shadow: 0 12px 35px #3F342F32;
 }
 
 .egg-eyebrow {
-  color: #B4A19B;
-  letter-spacing: 2px;
+  color: #B7A29A;
   font-size: 10px;
+  letter-spacing: 2px;
 }
 
-.egg-dialog h2 {
-  font: 28px 'Jua', sans-serif;
-  color: #87796E;
+.egg-popup h2 {
   margin: 10px 0;
+  color: #87776D;
+  font: 29px 'Jua', sans-serif;
 }
 
-.egg-dialog p { font-size: 13px; }
+.egg-popup p { font-size: 13px; }
 
-.egg-to-crack {
+.egg-button {
   position: relative;
   display: block;
-  margin: 20px auto;
-  padding: 15px 26px;
   border: 0;
-  border-radius: 28px;
-  background: #F1E8DC;
-  font-size: 70px;
-  transition: transform .15s ease;
+  border-radius: 26px;
+  background: #F1E5D8;
+  padding: 18px 29px;
+  font-size: 68px;
+  margin: 22px auto;
 }
 
-.egg-to-crack:active {
-  transform: scale(.92) rotate(-5deg);
-}
+.egg-button:active { transform: scale(.94); }
 
-.crack-mark {
+.egg-crack {
   position: absolute;
-  top: 12px;
-  left: 48%;
-  font-size: 45px;
-  color: #9D7458;
+  color: #97775D;
+  top: 10px;
+  left: 45%;
 }
 
-.cancel-egg {
+.egg-close {
   background: none;
-  border: 0;
-  color: #A59385;
+  border: none;
   font-size: 12px;
-  padding: 10px;
+  color: #A89585;
 }
 
 @media (max-width: 600px) {
-  .ingredient-list {
+  .pantry-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
   }
 
-  .ingredient {
+  .pantry-item {
     flex-direction: row;
-    justify-content: center;
-    padding: 5px 3px;
-    font-size: 11px;
+    padding: 6px 3px;
   }
 
-  .ingredient-symbol { font-size: 21px; }
-  .baking-title h1 { font-size: 24px; }
-  .measure-controls { gap: 8px; }
-  .pour-button { padding: 10px; }
-  .egg-controls span { font-size: 11px; }
+  .pantry-emoji { font-size: 21px; }
+  .pantry-name { font-size: 11px; }
+  .baking-intro h1 { font-size: 24px; }
+
+  .pantry-title span {
+    max-width: 65%;
+    text-align: right;
+  }
 }
 
-@media (max-height: 620px) {
-  .baking-title { padding-top: 6px; }
-  .baking-title p { display: none; }
-  .baking-drop-zone { min-height: 120px; }
-  .baking-dock { padding-top: 7px; }
+@media (max-height: 600px) {
+  .baking-intro { padding-top: 7px; }
+  .baking-intro p { display: none; }
+  .baking-bowl-area { min-height: 128px; }
+  .baking-pantry { padding-top: 7px; }
+  .pantry-hint { display: none; }
 }
 `;
 
 const root = document.getElementById("root");
+
 if (root) {
   createRoot(root).render(<BakingDemo />);
 }
